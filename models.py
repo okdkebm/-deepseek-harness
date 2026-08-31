@@ -75,7 +75,18 @@ class ChatModel:
         return self.model
 
     def _post(self, payload: dict) -> dict:
-        return _post_json(f"{self.base_url}/chat/completions", payload, self.api_key)
+        data = _post_json(f"{self.base_url}/chat/completions", payload, self.api_key)
+        # 部分网关在 HTTP 200 内返回错误体（如 OpenRouter provider 限流）
+        err = data.get("error") if isinstance(data, dict) else None
+        if err:
+            code = err.get("code", 0)
+            try:
+                status = int(str(code))
+            except (TypeError, ValueError):
+                status = None
+            raise ModelError(
+                f"端点返回错误: {err.get('message', err)}", status=status)
+        return data
 
     def chat(self, messages: list, tools: list, temperature: float = 0.3) -> dict:
         """messages: 已裁剪的对话；tools: 工具 JSON Schema 描述。

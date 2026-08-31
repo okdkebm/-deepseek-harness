@@ -56,6 +56,8 @@ def assemble_host(args, serve_mode: bool = False) -> PluginHost:
     host.install("context")
     # 工具依赖 guard/model/session
     host.install("tools")
+    # 技能知识库（只读工具 skill_query，依赖 tools）
+    host.install("skills")
     # 主循环可替换
     host.install(f"loop_{args.loop}")
     # 初始禁用
