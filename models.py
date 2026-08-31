@@ -8,10 +8,16 @@ import urllib.request
 import urllib.error
 
 DEFAULT_TIMEOUT = 180  # 推理超时（秒）
+RETRY_HTTP_CODES = {429, 500, 502, 503, 504}  # 可重试（限流/暂时不可用）
+RETRY_SLEEPS = (10, 20, 40, 60)              # 指数退避（秒）
 
 
 class ModelError(Exception):
     """模型调用失败（网络/协议/额度）"""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 def _norm_message(msg: dict) -> dict:
@@ -49,7 +55,7 @@ def _post_json(url: str, payload: dict, api_key: str) -> dict:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")[:300]
-        raise ModelError(f"HTTP {e.code}: {e.reason} {body}") from e
+        raise ModelError(f"HTTP {e.code}: {e.reason} {body}", status=e.code) from e
     except urllib.error.URLError as e:
         raise ModelError(f"无法连接端点 {url}: {e.reason}") from e
 
@@ -67,19 +73,32 @@ class ChatModel:
 
     def chat(self, messages: list, tools: list, temperature: float = 0.3) -> dict:
         """messages: 已裁剪的对话；tools: 工具 JSON Schema 描述。
-        返回规范化 message，可能带 tool_calls。"""
+        返回规范化 message，可能带 tool_calls。
+        对 429/5xx 自动退避重试（限流时无需人工干预）。"""
         payload = {
             "model": self.model,
             "messages": messages,
             "tools": tools,
             "temperature": temperature,
         }
-        data = _post_json(f"{self.base_url}/chat/completions", payload, self.api_key)
-        try:
-            msg = data["choices"][0]["message"]
-        except (KeyError, IndexError) as e:
-            raise ModelError(f"端点响应异常: {str(data)[:300]}") from e
-        return _norm_message(msg)
+        last_err: ModelError | None = None
+        for attempt in range(len(RETRY_SLEEPS) + 1):
+            try:
+                data = _post_json(f"{self.base_url}/chat/completions", payload, self.api_key)
+                try:
+                    msg = data["choices"][0]["message"]
+                except (KeyError, IndexError) as e:
+                    raise ModelError(f"端点响应异常: {str(data)[:300]}") from e
+                return _norm_message(msg)
+            except ModelError as e:
+                last_err = e
+                if e.status not in RETRY_HTTP_CODES or attempt >= len(RETRY_SLEEPS):
+                    raise
+                delay = RETRY_SLEEPS[attempt]
+                print(f"[重试] {self.model} 限流/暂时不可用（HTTP {e.status}），"
+                      f"{delay} 秒后自动重试…", flush=True)
+                time.sleep(delay)
+        raise last_err
 
 
 class MockDriver:
