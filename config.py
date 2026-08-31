@@ -9,6 +9,9 @@ import pathlib
 BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
 MODEL = os.environ.get("LLM_MODEL", "qwen2.5-coder:7b")
 API_KEY = os.environ.get("LLM_API_KEY", "")
+# 备用免费模型（限流时自动轮换），逗号分隔
+FALLBACK_MODELS = [m.strip() for m in
+                   os.environ.get("DSH_FALLBACK_MODELS", "").split(",") if m.strip()]
 
 # ---- 沙箱 / 工作区 ----
 WORKSPACE = pathlib.Path(os.environ.get("DSH_WORKSPACE", os.getcwd())).resolve()

@@ -9,7 +9,7 @@ import urllib.error
 
 DEFAULT_TIMEOUT = 180  # 推理超时（秒）
 RETRY_HTTP_CODES = {429, 500, 502, 503, 504}  # 可重试（限流/暂时不可用）
-RETRY_SLEEPS = (10, 20, 40, 60)              # 指数退避（秒）
+RETRY_SLEEPS = (5, 10)                        # 每个模型内的退避（秒），更短更快恢复
 
 
 class ModelError(Exception):
@@ -61,44 +61,58 @@ def _post_json(url: str, payload: dict, api_key: str) -> dict:
 
 
 class ChatModel:
-    """OpenAI 兼容驱动（Ollama / OpenRouter / 任意 openai 兼容网关）。"""
+    """OpenAI 兼容驱动（Ollama / OpenRouter / 任意 openai 兼容网关）。
+    429/5xx 自动退避重试；连续失败自动轮换备用模型（fallbacks）。"""
 
-    def __init__(self, base_url: str, model: str, api_key: str = ""):
+    def __init__(self, base_url: str, model: str, api_key: str = "",
+                 fallbacks: list[str] | None = None):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        self.fallbacks = list(fallbacks or [])
 
     def name(self) -> str:
         return self.model
 
+    def _post(self, payload: dict) -> dict:
+        return _post_json(f"{self.base_url}/chat/completions", payload, self.api_key)
+
     def chat(self, messages: list, tools: list, temperature: float = 0.3) -> dict:
         """messages: 已裁剪的对话；tools: 工具 JSON Schema 描述。
         返回规范化 message，可能带 tool_calls。
-        对 429/5xx 自动退避重试（限流时无需人工干预）。"""
+        当前模型退避重试，失败依次轮换 fallbacks，全部失败才抛错。"""
         payload = {
             "model": self.model,
             "messages": messages,
             "tools": tools,
             "temperature": temperature,
         }
+        candidates = [self.model] + self.fallbacks
         last_err: ModelError | None = None
-        for attempt in range(len(RETRY_SLEEPS) + 1):
-            try:
-                data = _post_json(f"{self.base_url}/chat/completions", payload, self.api_key)
+        for cand in candidates:
+            payload["model"] = cand
+            for attempt in range(len(RETRY_SLEEPS) + 1):
                 try:
-                    msg = data["choices"][0]["message"]
-                except (KeyError, IndexError) as e:
-                    raise ModelError(f"端点响应异常: {str(data)[:300]}") from e
-                return _norm_message(msg)
-            except ModelError as e:
-                last_err = e
-                if e.status not in RETRY_HTTP_CODES or attempt >= len(RETRY_SLEEPS):
-                    raise
-                delay = RETRY_SLEEPS[attempt]
-                print(f"[重试] {self.model} 限流/暂时不可用（HTTP {e.status}），"
-                      f"{delay} 秒后自动重试…", flush=True)
-                time.sleep(delay)
-        raise last_err
+                    data = self._post(payload)
+                    try:
+                        msg = data["choices"][0]["message"]
+                    except (KeyError, IndexError) as e:
+                        raise ModelError(f"端点响应异常: {str(data)[:300]}") from e
+                    if cand != self.model:
+                        print(f"[轮换] 已切换模型 {self.model} -> {cand}", flush=True)
+                        self.model = cand
+                    return _norm_message(msg)
+                except ModelError as e:
+                    last_err = e
+                    if e.status not in RETRY_HTTP_CODES or attempt >= len(RETRY_SLEEPS):
+                        break
+                    delay = RETRY_SLEEPS[attempt]
+                    print(f"[重试] {cand} 限流/暂时不可用（HTTP {e.status}），"
+                          f"{delay} 秒后自动重试…", flush=True)
+                    time.sleep(delay)
+            if last_err and last_err.status not in RETRY_HTTP_CODES:
+                break  # 非限流错误不再轮换
+        raise last_err if last_err else ModelError("模型调用失败")
 
 
 class MockDriver:
