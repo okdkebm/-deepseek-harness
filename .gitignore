@@ -1,0 +1,11 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 运行时数据（本地会话记录不入库）
+.dsh/
+
+# 系统
+.DS_Store
+Thumbs.db
